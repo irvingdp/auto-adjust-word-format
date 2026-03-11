@@ -1,0 +1,37 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install python-docx lxml pyinstaller
+
+      - name: Build exe
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --name "FormatDocx" `
+            --add-data "format_docx.py;." `
+            --hidden-import lxml._elementpath `
+            --hidden-import lxml.etree `
+            format_docx_gui.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FormatDocx-windows
+          path: dist/FormatDocx.exe

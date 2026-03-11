@@ -1,0 +1,11 @@
+source/
+target/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+dist/
+build/
+*.spec
+.DS_Store
