@@ -5,17 +5,24 @@ echo   Building format_docx.exe for Windows
 echo ============================================
 echo.
 
-where python >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Python not found. Please install Python 3.10+ first.
+where py >nul 2>&1
+if not "%errorlevel%"=="0" (
+    echo [ERROR] Python Launcher 'py' not found. Please install Python 3.10+ first.
     echo         https://www.python.org/downloads/
     pause
     exit /b 1
 )
 
+set "PY=py -3.12"
+
+echo Cleaning old build outputs...
+if exist build rmdir /s /q build
+if exist dist rmdir /s /q dist
+if exist FormatDocx.spec del /q FormatDocx.spec
+
 echo [1/3] Installing dependencies...
-pip install python-docx lxml pyinstaller
-if %errorlevel% neq 0 (
+%PY% -m pip install -r requirements.txt
+if not "%errorlevel%"=="0" (
     echo [ERROR] Failed to install dependencies.
     pause
     exit /b 1
@@ -23,17 +30,15 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [2/3] Building exe with PyInstaller...
-pyinstaller ^
+%PY% -m PyInstaller ^
     --noconfirm ^
     --onefile ^
     --windowed ^
     --name "FormatDocx" ^
     --add-data "format_docx.py;." ^
-    --hidden-import lxml._elementpath ^
-    --hidden-import lxml.etree ^
     format_docx_gui.py
 
-if %errorlevel% neq 0 (
+if not "%errorlevel%"=="0" (
     echo [ERROR] PyInstaller build failed.
     pause
     exit /b 1
@@ -47,4 +52,4 @@ echo.
 echo   Usage:   Double-click FormatDocx.exe, select a .docx file,
 echo            and the adjusted file will be saved next to the original.
 echo.
-pause
+exit /b 0
