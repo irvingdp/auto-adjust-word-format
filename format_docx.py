@@ -456,6 +456,35 @@ def autofit_tables_to_window(doc):
 # Main
 # ---------------------------------------------------------------------------
 
+def fix_cell_paragraph_indents(doc):
+    """Remove right indents and tab stops from all table-cell paragraphs.
+
+    Landscape-origin right indents squeeze text in portrait columns,
+    causing severe early wrapping.  Right indent in table cells is
+    almost never intentional — remove it entirely.  Tab stops are also
+    removed since they can push content beyond the visible cell area.
+    """
+    fixed = 0
+    for tbl in doc.element.body.iter(f"{W}tbl"):
+        for p in tbl.iter(f"{W}p"):
+            ppr = p.find(f"{W}pPr")
+            if ppr is None:
+                continue
+
+            ind = ppr.find(f"{W}ind")
+            if ind is not None:
+                right = ind.get(f"{W}right")
+                if right and int(right) > 0:
+                    ind.set(f"{W}right", "0")
+                    fixed += 1
+
+            tabs = ppr.find(f"{W}tabs")
+            if tabs is not None:
+                ppr.remove(tabs)
+
+    return fixed
+
+
 def remove_headers(doc):
     """Remove all header content from every section."""
     for section in doc.sections:
@@ -507,6 +536,10 @@ def process(input_path: str, output_path: str):
     set_portrait(doc)
     autofit_tables_to_window(doc)
     print("  Set portrait orientation & auto-fit tables to window")
+
+    # 6. Fix cell paragraph indents (remove right indents & tab stops)
+    indent_fixed = fix_cell_paragraph_indents(doc)
+    print(f"  Fixed {indent_fixed} paragraph(s) with excessive indent")
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
