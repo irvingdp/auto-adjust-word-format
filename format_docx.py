@@ -456,8 +456,24 @@ def autofit_tables_to_window(doc):
 # Main
 # ---------------------------------------------------------------------------
 
+def remove_headers(doc):
+    """Remove all header content from every section."""
+    for section in doc.sections:
+        for header in (section.header, section.first_page_header, section.even_page_header):
+            if header and header.is_linked_to_previous is False or header._element is not None:
+                for p in list(header.paragraphs):
+                    p._element.getparent().remove(p._element)
+                for tbl in list(header.tables):
+                    tbl._element.getparent().remove(tbl._element)
+                header.is_linked_to_previous = True
+
+
 def process(input_path: str, output_path: str):
     doc = Document(input_path)
+
+    # 0. Remove headers
+    remove_headers(doc)
+    print("  Removed all headers")
 
     # 1. Delete columns
     cols_to_delete = ["No. of Samples", "Banner"]
@@ -498,6 +514,6 @@ def process(input_path: str, output_path: str):
 
 
 if __name__ == "__main__":
-    src = sys.argv[1] if len(sys.argv) > 1 else "source/word原檔轉檔測試.docx"
-    dst = sys.argv[2] if len(sys.argv) > 2 else "target/word原檔轉檔測試_adjusted.docx"
+    src = sys.argv[1] if len(sys.argv) > 1 else "source/原檔.docx"
+    dst = sys.argv[2] if len(sys.argv) > 2 else "target/原檔_adjusted.docx"
     process(src, dst)
