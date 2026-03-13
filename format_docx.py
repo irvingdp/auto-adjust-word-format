@@ -505,7 +505,7 @@ def process(input_path: str, output_path: str):
     print("  Removed all headers")
 
     # 1. Delete columns
-    cols_to_delete = ["No. of Samples", "Banner"]
+    cols_to_delete = ["No. of Samples"]
     for col_name in cols_to_delete:
         count = 0
         for table in doc.tables:
