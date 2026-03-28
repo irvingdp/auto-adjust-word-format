@@ -6,6 +6,8 @@ Auto-adjust Word document format:
 3. Split "Result/ Rating" into two columns: "Result" and "Rating"
 4. Change all fonts to Tahoma, 10pt
 5. Change orientation from landscape to portrait, auto-fit tables to window
+6. If a table's estimated height exceeds one third of the page body, assign
+   exact row heights whose total stays within one page (minus a small reserve)
 """
 
 import copy
@@ -453,6 +455,149 @@ def autofit_tables_to_window(doc):
                         tcw.set(f"{W}w", "0")
 
 
+# Estimated line height (twips) for Tahoma ~10pt after change_all_fonts.
+_EST_LINE_TWIPS = 240
+
+# When stretching a table toward one page, stay below the body height so grid
+# lines, default cell padding, and layout rounding do not push the table past
+# a single printed page.
+_TABLE_STRETCH_RESERVE_TWIPS = 1440
+_MIN_STRETCH_ROW_TWIPS = 50
+# No single row may exceed this fraction of the table height budget (avoids
+# one mega-row that still overflows visually with margins/borders).
+_MAX_ROW_FRAC_OF_TABLE_TARGET = 0.40
+
+
+def _section_body_height_twips(section):
+    """Vertical space between top and bottom margins (twips)."""
+    ph = section.page_height.twips
+    tm = section.top_margin.twips if section.top_margin is not None else 1440
+    bm = section.bottom_margin.twips if section.bottom_margin is not None else 1440
+    return max(ph - tm - bm, 1)
+
+
+def _estimated_row_height_twips(tr_el):
+    tr_pr = tr_el.find(f"{W}trPr")
+    if tr_pr is not None:
+        th = tr_pr.find(f"{W}trHeight")
+        if th is not None:
+            val = th.get(f"{W}val")
+            if val is not None:
+                return max(int(val), 40)
+    max_lines = 1
+    for tc in tr_el.findall(f"{W}tc"):
+        n = len(tc.findall(f"{W}p"))
+        max_lines = max(max_lines, n)
+    return max_lines * _EST_LINE_TWIPS
+
+
+def _estimate_table_height_twips(tbl_el):
+    return sum(_estimated_row_height_twips(tr) for tr in tbl_el.findall(f"{W}tr"))
+
+
+def _set_tr_height_rule(tr_el, twips_val: int, rule: str):
+    """rule: ``atLeast`` or ``exact`` (OOXML w:hRule)."""
+    tr_pr = tr_el.find(f"{W}trPr")
+    if tr_pr is None:
+        tr_pr = etree.SubElement(tr_el, f"{W}trPr")
+        tr_el.insert(0, tr_pr)
+    th = tr_pr.find(f"{W}trHeight")
+    if th is None:
+        th = etree.SubElement(tr_pr, f"{W}trHeight")
+    th.set(f"{W}val", str(max(twips_val, 1)))
+    th.set(f"{W}hRule", rule)
+
+
+def _distribute_row_heights_to_target(weights, target_total: int):
+    """Integer row heights proportional to *weights*, sum == *target_total*.
+
+    Each row is capped so one heavy content row cannot consume almost the full
+    page (which tends to overflow in Word once padding and borders apply).
+
+    Returns None if *target_total* is too small to give each row the minimum height.
+    """
+    n = len(weights)
+    if n == 0 or target_total <= 0:
+        return []
+    total_w = sum(weights)
+    max_row = max(
+        _MIN_STRETCH_ROW_TWIPS,
+        int(target_total * _MAX_ROW_FRAC_OF_TABLE_TARGET),
+    )
+    if total_w <= 0:
+        base = max(target_total // n, _MIN_STRETCH_ROW_TWIPS)
+        if base * n > target_total:
+            return None
+        return [min(base, max_row)] * n
+
+    raw = [w * target_total / total_w for w in weights]
+    heights = [
+        max(_MIN_STRETCH_ROW_TWIPS, min(max_row, int(x)))
+        for x in raw
+    ]
+
+    while sum(heights) > target_total:
+        idx = max(range(n), key=lambda i: heights[i])
+        if heights[idx] <= _MIN_STRETCH_ROW_TWIPS:
+            return None
+        heights[idx] -= 1
+
+    deficit = target_total - sum(heights)
+    fracs = sorted(
+        range(n),
+        key=lambda i: raw[i] - int(raw[i]),
+        reverse=True,
+    )
+    k = 0
+    guard = n * (target_total + 5)
+    while deficit > 0 and k < guard:
+        i = fracs[k % n]
+        if heights[i] < max_row:
+            heights[i] += 1
+            deficit -= 1
+        k += 1
+    # If deficit remains, every row is at max_row — leave table slightly short
+    # rather than exceeding one page.
+
+    return heights
+
+
+def stretch_tall_tables_to_page_body(doc):
+    """Scale row heights when the table is moderately tall but under one page.
+
+    Estimated height must be between one third of the page body and the full
+    body. Row heights are set with ``exact`` so their sum stays at or below the
+    printable body minus a small reserve, avoiding overflow past one page.
+    """
+    if not doc.sections:
+        return 0
+    section = doc.sections[0]
+    body_h = _section_body_height_twips(section)
+    threshold = body_h / 3.0
+    target_cap = max(body_h - _TABLE_STRETCH_RESERVE_TWIPS, 1)
+    stretched = 0
+
+    for tbl in doc.element.body.iter(f"{W}tbl"):
+        rows = tbl.findall(f"{W}tr")
+        if not rows:
+            continue
+        row_heights = [_estimated_row_height_twips(tr) for tr in rows]
+        total = sum(row_heights)
+        n = len(rows)
+        if total <= threshold or total >= body_h:
+            continue
+        if n * _MIN_STRETCH_ROW_TWIPS > target_cap:
+            continue
+        heights = _distribute_row_heights_to_target(row_heights, target_cap)
+        if heights is None:
+            continue
+        for tr, h in zip(rows, heights):
+            _set_tr_height_rule(tr, h, "exact")
+        stretched += 1
+
+    return stretched
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -607,7 +752,11 @@ def process(input_path: str, output_path: str):
     # 5. Orientation + auto-fit
     set_portrait(doc)
     autofit_tables_to_window(doc)
-    print("  Set portrait orientation & auto-fit tables to window")
+    n_stretch = stretch_tall_tables_to_page_body(doc)
+    print(
+        "  Set portrait orientation & auto-fit tables to window"
+        + (f"; stretched {n_stretch} tall table(s) to page height" if n_stretch else "")
+    )
 
     # 6. Fix cell paragraph indents (remove right indents & tab stops)
     indent_fixed = fix_cell_paragraph_indents(doc)
