@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Auto-adjust Word document format:
-1. Delete "No. of Samples" and "Banner" columns from tables
-2. Split "Result/ Rating" into two columns: "Result" and "Rating"
-3. Change all fonts to Tahoma, 10pt
-4. Change orientation from landscape to portrait, auto-fit tables to window
+1. Clear headers & footers; remove tables containing GREENBRIER protocol banner text
+2. Delete "No. of Samples" and "Banner" columns from tables
+3. Split "Result/ Rating" into two columns: "Result" and "Rating"
+4. Change all fonts to Tahoma, 10pt
+5. Change orientation from landscape to portrait, auto-fit tables to window
 """
 
 import copy
@@ -485,24 +486,95 @@ def fix_cell_paragraph_indents(doc):
     return fixed
 
 
-def remove_headers(doc):
-    """Remove all header content from every section."""
+# Direct children of w:hdr / w:ftr that carry visible story content.
+_HDR_FTR_BLOCK_TAGS = (f"{W}p", f"{W}tbl", f"{W}sdt")
+
+
+def _clear_hdr_ftr_element(root_el):
+    """Strip all block-level children from a header/footer root (w:hdr / w:ftr)."""
+    for child in list(root_el):
+        if child.tag in _HDR_FTR_BLOCK_TAGS:
+            root_el.remove(child)
+
+
+def clear_headers_and_footers(doc):
+    """Remove all header and footer content from every section."""
     for section in doc.sections:
-        for header in (section.header, section.first_page_header, section.even_page_header):
-            if header and header.is_linked_to_previous is False or header._element is not None:
-                for p in list(header.paragraphs):
-                    p._element.getparent().remove(p._element)
-                for tbl in list(header.tables):
-                    tbl._element.getparent().remove(tbl._element)
-                header.is_linked_to_previous = True
+        for part in (
+            section.header,
+            section.first_page_header,
+            section.even_page_header,
+            section.footer,
+            section.first_page_footer,
+            section.even_page_footer,
+        ):
+            _clear_hdr_ftr_element(part._element)
+            part.is_linked_to_previous = True
+
+
+# Tables whose cell text (any cell, including nested content) contains this phrase are removed.
+GREENBRIER_PROTOCOL_MARKER = "GREENBRIER INTERNATIONAL INC TEST PROTOCOL"
+
+
+def _table_text_blob(tbl_el):
+    return "".join((t.text or "") for t in tbl_el.iter(f"{W}t"))
+
+
+def _collapse_whitespace_for_match(s: str) -> str:
+    """Lowercase and strip all whitespace so line breaks between words still match.
+
+    Word often splits banner titles across paragraphs; concatenating <w:t> runs
+    then yields e.g. '...TEST' + 'PROTOCOL' with no space, which would not match
+    the literal phrase 'TEST PROTOCOL'.
+    """
+    return "".join(s.split()).lower()
+
+
+def remove_tables_containing_phrase(doc, phrase: str) -> int:
+    """Drop any table that contains *phrase* in its text (case-insensitive).
+
+    Whitespace is ignored for the substring test so titles split across
+    paragraphs (e.g. ``TEST`` / ``PROTOCOL`` on separate lines) still match.
+
+    When tables are nested, the **outermost** matching table is removed so the
+    whole banner row (logos + text + page line) is stripped, not only an inner
+    cell table.
+    """
+    needle = _collapse_whitespace_for_match(phrase)
+    body = doc.element.body
+    all_tbl = list(body.iter(f"{W}tbl"))
+    matching = [
+        tbl
+        for tbl in all_tbl
+        if needle in _collapse_whitespace_for_match(_table_text_blob(tbl))
+    ]
+    if not matching:
+        return 0
+
+    def has_matching_ancestor(t):
+        return any(m is not t and m in t.iterancestors() for m in matching)
+
+    to_remove = [t for t in matching if not has_matching_ancestor(t)]
+    depth = lambda el: sum(1 for _ in el.iterancestors())
+    removed = 0
+    for tbl in sorted(to_remove, key=depth):
+        parent = tbl.getparent()
+        if parent is not None:
+            parent.remove(tbl)
+            removed += 1
+    return removed
 
 
 def process(input_path: str, output_path: str):
     doc = Document(input_path)
 
-    # 0. Remove headers
-    remove_headers(doc)
-    print("  Removed all headers")
+    # 0. Clear headers & footers
+    clear_headers_and_footers(doc)
+    print("  Cleared headers & footers")
+
+    # 0b. Remove protocol banner tables
+    n_banner = remove_tables_containing_phrase(doc, GREENBRIER_PROTOCOL_MARKER)
+    print(f"  Removed {n_banner} table(s) containing protocol banner text")
 
     # 1. Delete columns
     cols_to_delete = ["No. of Samples"]
