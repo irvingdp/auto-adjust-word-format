@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox
 from pathlib import Path
 
 from format_docx import process
+from rtf_to_docx import convert_rtf_to_docx
 
 
 def main():
@@ -18,8 +19,12 @@ def main():
     root.withdraw()
 
     src = filedialog.askopenfilename(
-        title="選擇要轉換的 Word 檔案",
-        filetypes=[("Word 文件", "*.docx")],
+        title="選擇要轉換的檔案",
+        filetypes=[
+            ("Word / RTF", "*.docx;*.rtf"),
+            ("Word", "*.docx"),
+            ("RTF", "*.rtf"),
+        ],
     )
     if not src:
         sys.exit(0)
@@ -28,7 +33,12 @@ def main():
     dst_path = src_path.with_stem(src_path.stem + "_adjusted")
 
     try:
-        process(str(src_path), str(dst_path))
+        if src_path.suffix.lower() == ".rtf":
+            conv = src_path.parent / f"{src_path.stem}_converted.docx"
+            convert_rtf_to_docx(src_path, conv)
+            process(str(conv), str(dst_path))
+        else:
+            process(str(src_path), str(dst_path))
         messagebox.showinfo("完成", f"轉換完成！\n輸出檔案：\n{dst_path}")
     except Exception:
         messagebox.showerror("錯誤", traceback.format_exc())

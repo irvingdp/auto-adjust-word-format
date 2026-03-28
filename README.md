@@ -28,9 +28,19 @@ python format_docx.py
 python format_docx.py input.docx output.docx
 ```
 
+### RTF 檔（`.rtf`）
+
+使用本機 **Microsoft Word**（透過 `pywin32` COM）將 RTF 存成 `.docx`，再執行與 `.docx` 相同的格式調整。需已安裝 Word 且 Python 環境已正確安裝並註冊 `pywin32`。
+
+```bash
+python format_docx.py source/report.rtf target/report_adjusted.docx
+```
+
+若只給 RTF 路徑、未指定輸出，預設為 `target/<檔名>_adjusted.docx`。中間會在輸出目錄產生 `<檔名>_converted.docx`。
+
 ### Windows EXE
 
-雙擊 `FormatDocx.exe` → 選擇 `.docx` 檔案 → 轉換後的檔案會存在原檔同目錄，檔名加上 `_adjusted`。
+雙擊 `FormatDocx.exe` → 選擇 `.docx` 或 `.rtf` → 轉換後的檔案會存在原檔同目錄，檔名加上 `_adjusted`。
 
 #### 打包 EXE
 
@@ -56,8 +66,9 @@ git push --tags
 
 ```
 ├── format_docx.py        # 核心轉換邏輯
+├── rtf_to_docx.py        # RTF→DOCX（Word COM）
 ├── format_docx_gui.py    # GUI 包裝（檔案選擇對話框）
-├── build_exe.bat          # Windows 一鍵打包腳本
-├── requirements.txt       # Python 依賴
-└── .github/workflows/     # GitHub Actions CI
+├── build_exe.bat         # Windows 一鍵打包腳本
+├── requirements.txt      # Python 依賴
+└── .github/workflows/    # GitHub Actions CI
 ```

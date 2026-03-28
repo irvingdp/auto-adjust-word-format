@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Auto-adjust Word document format:
+0. Optional: if input is .rtf, convert to .docx via Word COM (pywin32; Windows only)
 1. Clear headers & footers; remove tables containing GREENBRIER protocol banner text
 2. Delete "No. of Samples" and "Banner" columns from tables
 3. Split "Result/ Rating" into two columns: "Result" and "Rating"
@@ -818,6 +819,28 @@ def process(input_path: str, output_path: str):
 
 
 if __name__ == "__main__":
-    src = sys.argv[1] if len(sys.argv) > 1 else "source/原檔.docx"
-    dst = sys.argv[2] if len(sys.argv) > 2 else "target/原檔_adjusted.docx"
-    process(src, dst)
+    argv = sys.argv[1:]
+
+    if not argv:
+        src = Path("source/原檔.docx")
+        dst = Path("target/原檔_adjusted.docx")
+    else:
+        src = Path(argv[0])
+        if len(argv) >= 2:
+            dst = Path(argv[1])
+        elif src.suffix.lower() == ".rtf":
+            dst = Path("target") / f"{src.stem}_adjusted.docx"
+        else:
+            dst = Path("target/原檔_adjusted.docx")
+
+    if src.suffix.lower() == ".rtf":
+        from rtf_to_docx import convert_rtf_to_docx
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        intermediate = dst.parent / f"{src.stem}_converted.docx"
+        print(f"  Converting RTF to DOCX (Word COM): {src}")
+        convert_rtf_to_docx(src, intermediate)
+        print(f"  Intermediate DOCX: {intermediate}")
+        process(str(intermediate), str(dst))
+    else:
+        process(str(src), str(dst))

@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install python-docx lxml pyinstaller
+        run: pip install python-docx lxml pyinstaller pywin32
 
       - name: Build exe
         run: |
@@ -29,8 +29,13 @@ jobs:
             --windowed `
             --name "FormatDocx" `
             --add-data "format_docx.py;." `
+            --add-data "rtf_to_docx.py;." `
+            --collect-all pywin32 `
             --hidden-import lxml._elementpath `
             --hidden-import lxml.etree `
+            --hidden-import win32com.client `
+            --hidden-import pythoncom `
+            --hidden-import pywintypes `
             format_docx_gui.py
 
       - name: Upload artifact
