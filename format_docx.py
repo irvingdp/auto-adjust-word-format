@@ -5,9 +5,12 @@ Auto-adjust Word document format:
 2. Delete "No. of Samples" and "Banner" columns from tables
 3. Split "Result/ Rating" into two columns: "Result" and "Rating"
 4. Change all fonts to Tahoma, 10pt
-5. Change orientation from landscape to portrait, auto-fit tables to window
+5. Change orientation to portrait; tables 100% page width; shrink gridCol only
+   if total column width overflows printable width (ratios preserved)
 6. If a table's estimated height exceeds one third of the page body, assign
-   exact row heights whose total stays within one page (minus a small reserve)
+   exact row heights whose total stays within one page (minus a small reserve);
+   data tables keep a reserved height for row 0 when stretching body rows
+7. Fix row 0 height on every data table to DATA_TABLE_HEADER_ROW_HEIGHT_TWIPS
 """
 
 import copy
@@ -183,6 +186,9 @@ HEADER_NAMES = {
     "criteria", "country", "result", "rating",
 }
 
+# First row of data tables: Tahoma ~10pt, ~2 lines in a cell + default padding (twips).
+DATA_TABLE_HEADER_ROW_HEIGHT_TWIPS = 630
+
 
 def _is_data_table(tbl_el):
     """Return True if the table looks like a data table (has known header names)."""
@@ -246,6 +252,20 @@ def clean_header_cells(doc):
 
         count += 1
     return count
+
+
+def fix_data_table_header_row_height(doc):
+    """Set a fixed exact height on row 0 of every data table."""
+    n = 0
+    for tbl in doc.element.body.iter(f"{W}tbl"):
+        if not _is_data_table(tbl):
+            continue
+        rows = tbl.findall(f"{W}tr")
+        if not rows:
+            continue
+        _set_tr_height_rule(rows[0], DATA_TABLE_HEADER_ROW_HEIGHT_TWIPS, "exact")
+        n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -317,85 +337,118 @@ def set_portrait(doc):
             section.page_height = max(w, h)
 
 
-def _compute_uniform_col_widths(doc):
-    """Compute a single set of column widths for all data tables.
+def _section_text_width_twips(section):
+    """Printable width between left and right margins (twips)."""
+    pw = section.page_width.twips
+    lm = section.left_margin.twips if section.left_margin is not None else 1440
+    rm = section.right_margin.twips if section.right_margin is not None else 1440
+    return max(pw - lm - rm, 1)
 
-    Fixed-width columns (FIXED_WIDTH_HEADERS) get their defined widths.
-    Remaining columns share the leftover space proportionally, using the
-    majority pattern from the source tables as a base.
+
+_MIN_GRID_COL_TWIPS = 30
+
+
+def _grid_col_widths(tbl_el):
+    """Return list of gridCol w values (dxa), or empty if missing."""
+    tbl_grid = tbl_el.find(f"{W}tblGrid")
+    if tbl_grid is None:
+        return []
+    out = []
+    for gc in tbl_grid.findall(f"{W}gridCol"):
+        v = gc.get(f"{W}w")
+        if v is None:
+            return []
+        out.append(int(v))
+    return out
+
+
+def _scale_widths_to_max_total(weights, max_total: int):
+    """Scale *weights* down so integer parts sum to *max_total*, keeping ratios.
+
+    Returns None if shrinking is impossible (e.g. too many columns for *max_total*).
     """
-    W_ = W
-    # Collect gridCol widths from every data table
-    all_widths = []
-    for table in doc.tables:
-        tbl_el = table._tbl
-        rows = tbl_el.findall(f"{W_}tr")
-        if not rows:
-            continue
-        headers = [cell_text(c).lower() for c in rows[0].findall(f"{W_}tc")]
-        if "evaluation" not in headers:
-            continue
-        tbl_grid = tbl_el.find(f"{W_}tblGrid")
-        if tbl_grid is None:
-            continue
-        gcols = [int(gc.get(f"{W_}w", "0")) for gc in tbl_grid.findall(f"{W_}gridCol")]
-        all_widths.append(tuple(gcols))
-
-    if not all_widths:
+    n = len(weights)
+    if n == 0 or max_total <= 0:
         return None
+    total = sum(weights)
+    if total <= max_total:
+        return list(weights)
+    raw = [w * max_total / total for w in weights]
+    scaled = [max(_MIN_GRID_COL_TWIPS, int(x)) for x in raw]
+    while sum(scaled) > max_total:
+        idx = max(range(n), key=lambda i: scaled[i])
+        if scaled[idx] <= _MIN_GRID_COL_TWIPS:
+            return None
+        scaled[idx] -= 1
+    deficit = max_total - sum(scaled)
+    fracs = sorted(
+        range(n),
+        key=lambda i: raw[i] - int(raw[i]),
+        reverse=True,
+    )
+    k = 0
+    guard = n * (max_total + 5)
+    while deficit > 0 and k < guard:
+        scaled[fracs[k % n]] += 1
+        deficit -= 1
+        k += 1
+    return scaled
 
-    # Use most-common pattern as base
-    from collections import Counter
-    base = list(Counter(all_widths).most_common(1)[0][0])
-    num_cols = len(base)
 
-    # Determine which grid indices are fixed-width (by checking first table header)
-    sample_tbl = None
-    for table in doc.tables:
-        tbl_el = table._tbl
-        rows = tbl_el.findall(f"{W_}tr")
-        if not rows:
-            continue
-        headers = [cell_text(c).lower() for c in rows[0].findall(f"{W_}tc")]
-        if "evaluation" in headers:
-            sample_tbl = tbl_el
-            break
-
-    fixed = {}  # grid_col_index → dxa
-    if sample_tbl is not None:
+def _rewrite_cell_widths_from_grid(tbl_el, col_widths):
+    """Set every cell tcW (dxa) to the sum of spanned *col_widths*."""
+    rows = tbl_el.findall(f"{W}tr")
+    for tr in rows:
         pos = 0
-        for hcell in sample_tbl.findall(f"{W_}tr")[0].findall(f"{W_}tc"):
-            span = get_grid_span(hcell)
-            txt = cell_text(hcell).lower()
-            if txt in FIXED_WIDTH_HEADERS:
-                w = (len(txt) + 2) * DXA_PER_CHAR
-                for gi in range(pos, pos + span):
-                    fixed[gi] = w
-            pos += span
+        for tc in tr.findall(f"{W}tc"):
+            span = get_grid_span(tc)
+            end = pos + span
+            cell_w = sum(col_widths[pos:end]) if end <= len(col_widths) else 0
+            tc_pr = tc.find(f"{W}tcPr")
+            if tc_pr is None:
+                tc_pr = etree.SubElement(tc, f"{W}tcPr")
+                tc.insert(0, tc_pr)
+            tcw = tc_pr.find(f"{W}tcW")
+            if tcw is None:
+                tcw = etree.SubElement(tc_pr, f"{W}tcW")
+            tcw.set(f"{W}type", "dxa")
+            tcw.set(f"{W}w", str(cell_w))
+            pos = end
 
-    # Apply fixed widths into the base; redistribute remaining space
-    fixed_total = sum(fixed.values())
-    flex_indices = [i for i in range(num_cols) if i not in fixed]
-    flex_original_total = sum(base[i] for i in flex_indices)
 
-    # Desired total = original total (keeps proportions the same, Word scales to 100%)
-    original_total = sum(base)
-    flex_target = original_total - fixed_total
+def _clamp_table_grid_to_text_width(tbl_el, max_text_twips: int, sync_cell_widths: bool):
+    """If sum(gridCol) > *max_text_twips*, scale grid down; keep column ratios.
 
-    uniform = list(base)
-    for gi, w in fixed.items():
-        if gi < num_cols:
-            uniform[gi] = w
-    if flex_original_total > 0 and flex_target > 0:
-        for i in flex_indices:
-            uniform[i] = round(base[i] / flex_original_total * flex_target)
-
-    return uniform
+    When *sync_cell_widths* is True (data-style tables), rewrite all tcW from the grid.
+    """
+    tbl_grid = tbl_el.find(f"{W}tblGrid")
+    if tbl_grid is None:
+        return False
+    gcols = tbl_grid.findall(f"{W}gridCol")
+    if not gcols:
+        return False
+    widths = [int(gc.get(f"{W}w", 0) or 0) for gc in gcols]
+    if not widths or sum(widths) <= max_text_twips:
+        return False
+    new_w = _scale_widths_to_max_total(widths, max_text_twips)
+    if new_w is None:
+        return False
+    for gc, w in zip(gcols, new_w):
+        gc.set(f"{W}w", str(w))
+    if sync_cell_widths:
+        _rewrite_cell_widths_from_grid(tbl_el, new_w)
+    return True
 
 
 def autofit_tables_to_window(doc):
-    """Set every table to 100 % page width with uniform column widths for data tables."""
-    uniform = _compute_uniform_col_widths(doc)
+    """Set every table to 100% page width; shrink grid only if it overflows the page.
+
+    Column width *ratios* are preserved when scaling; we do not replace them
+    with a document-wide uniform layout.
+    """
+    if not doc.sections:
+        return
+    text_w = _section_text_width_twips(doc.sections[0])
 
     for tbl in doc.element.body.iter(f"{W}tbl"):
         tbl_pr = tbl.find(f"{W}tblPr")
@@ -403,49 +456,22 @@ def autofit_tables_to_window(doc):
             tbl_pr = etree.SubElement(tbl, f"{W}tblPr")
             tbl.insert(0, tbl_pr)
 
-        # Table width = 100 %
         tw = tbl_pr.find(f"{W}tblW")
         if tw is None:
             tw = etree.SubElement(tbl_pr, f"{W}tblW")
         tw.set(f"{W}w", "5000")
         tw.set(f"{W}type", "pct")
 
-        # Remove fixed layout
         layout = tbl_pr.find(f"{W}tblLayout")
         if layout is not None:
             tbl_pr.remove(layout)
 
-        # Check if this is a data table
         rows = tbl.findall(f"{W}tr")
-        is_data = False
-        if rows:
-            headers = [cell_text(c).lower() for c in rows[0].findall(f"{W}tc")]
-            is_data = "evaluation" in headers
+        is_data = bool(rows) and "evaluation" in [
+            cell_text(c).lower() for c in rows[0].findall(f"{W}tc")
+        ]
 
-        if is_data and uniform is not None:
-            # Apply uniform gridCol widths
-            tbl_grid = tbl.find(f"{W}tblGrid")
-            if tbl_grid is not None:
-                gcols = tbl_grid.findall(f"{W}gridCol")
-                for gi, gc in enumerate(gcols):
-                    if gi < len(uniform):
-                        gc.set(f"{W}w", str(uniform[gi]))
-
-            # Apply matching tcW on every cell
-            for tr in rows:
-                pos = 0
-                for tc in tr.findall(f"{W}tc"):
-                    span = get_grid_span(tc)
-                    tc_pr = tc.find(f"{W}tcPr")
-                    if tc_pr is not None:
-                        tcw = tc_pr.find(f"{W}tcW")
-                        if tcw is not None:
-                            cell_w = sum(uniform[pos:pos + span]) if pos + span <= len(uniform) else 0
-                            tcw.set(f"{W}type", "dxa")
-                            tcw.set(f"{W}w", str(cell_w))
-                    pos += span
-        else:
-            # Non-data tables: just set auto
+        if not is_data:
             for tc in tbl.iter(f"{W}tc"):
                 tc_pr = tc.find(f"{W}tcPr")
                 if tc_pr is not None:
@@ -453,6 +479,8 @@ def autofit_tables_to_window(doc):
                     if tcw is not None:
                         tcw.set(f"{W}type", "auto")
                         tcw.set(f"{W}w", "0")
+
+        _clamp_table_grid_to_text_width(tbl, text_w, sync_cell_widths=is_data)
 
 
 # Estimated line height (twips) for Tahoma ~10pt after change_all_fonts.
@@ -568,6 +596,10 @@ def stretch_tall_tables_to_page_body(doc):
     Estimated height must be between one third of the page body and the full
     body. Row heights are set with ``exact`` so their sum stays at or below the
     printable body minus a small reserve, avoiding overflow past one page.
+
+    Data tables reserve ``DATA_TABLE_HEADER_ROW_HEIGHT_TWIPS`` for row 0; only
+    body rows (1..end) share the remaining vertical budget. Row 0 is set later
+    by ``fix_data_table_header_row_height``.
     """
     if not doc.sections:
         return 0
@@ -575,6 +607,7 @@ def stretch_tall_tables_to_page_body(doc):
     body_h = _section_body_height_twips(section)
     threshold = body_h / 3.0
     target_cap = max(body_h - _TABLE_STRETCH_RESERVE_TWIPS, 1)
+    header_h = DATA_TABLE_HEADER_ROW_HEIGHT_TWIPS
     stretched = 0
 
     for tbl in doc.element.body.iter(f"{W}tbl"):
@@ -586,14 +619,29 @@ def stretch_tall_tables_to_page_body(doc):
         n = len(rows)
         if total <= threshold or total >= body_h:
             continue
-        if n * _MIN_STRETCH_ROW_TWIPS > target_cap:
-            continue
-        heights = _distribute_row_heights_to_target(row_heights, target_cap)
-        if heights is None:
-            continue
-        for tr, h in zip(rows, heights):
-            _set_tr_height_rule(tr, h, "exact")
-        stretched += 1
+        is_dt = _is_data_table(tbl)
+
+        if is_dt and n > 1:
+            body_target = target_cap - header_h
+            if body_target < (n - 1) * _MIN_STRETCH_ROW_TWIPS:
+                continue
+            heights_body = _distribute_row_heights_to_target(
+                row_heights[1:], body_target
+            )
+            if heights_body is None:
+                continue
+            for tr, h in zip(rows[1:], heights_body):
+                _set_tr_height_rule(tr, h, "exact")
+            stretched += 1
+        else:
+            if n * _MIN_STRETCH_ROW_TWIPS > target_cap:
+                continue
+            heights = _distribute_row_heights_to_target(row_heights, target_cap)
+            if heights is None:
+                continue
+            for tr, h in zip(rows, heights):
+                _set_tr_height_rule(tr, h, "exact")
+            stretched += 1
 
     return stretched
 
@@ -753,9 +801,11 @@ def process(input_path: str, output_path: str):
     set_portrait(doc)
     autofit_tables_to_window(doc)
     n_stretch = stretch_tall_tables_to_page_body(doc)
+    n_hdr_h = fix_data_table_header_row_height(doc)
     print(
         "  Set portrait orientation & auto-fit tables to window"
         + (f"; stretched {n_stretch} tall table(s) to page height" if n_stretch else "")
+        + f"; fixed header row height in {n_hdr_h} data table(s)"
     )
 
     # 6. Fix cell paragraph indents (remove right indents & tab stops)
